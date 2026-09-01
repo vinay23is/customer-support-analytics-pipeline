@@ -263,6 +263,10 @@ live in one place.
   natural = the business ID (`CU001`). Facts join on surrogates for stability.
 - **SCD Type 2** — keep history by versioning dimension rows with
   `valid_from`/`valid_to`/`is_current` rather than overwriting.
+- **Role-playing dimension** — `dim_date` is joined to the fact **twice**, once via
+  `created_date_key` and once via `closed_date_key`. One physical dimension, two roles
+  ("created date" vs "closed date"). If asked, that's the term for it, and it's why the ERD
+  shows two links into `dim_date`.
 
 ---
 

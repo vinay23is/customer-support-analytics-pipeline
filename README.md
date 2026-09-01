@@ -1,8 +1,17 @@
 # Customer Support Analytics Pipeline
 
+![Snowflake](https://img.shields.io/badge/Snowflake-SQL-29B5E8?logo=snowflake&logoColor=white)
+![Dimensional Modeling](https://img.shields.io/badge/Modeling-Star%20Schema-blue)
+![Python](https://img.shields.io/badge/Verified%20with-Python-3776AB?logo=python&logoColor=white)
+![Status](https://img.shields.io/badge/Numbers-Reproducible-brightgreen)
+
 An end-to-end analytics engineering case study: three raw CSV files are turned into a
 clean, analytics-ready **star schema** on **Snowflake**, ready for a BI tool (Power BI /
 Tableau) to sit on top of. Built as a Senior Data Architect interview exercise.
+
+📘 **Preparing for an interview with this?** Start with
+**[INTERVIEW_PREP.md](INTERVIEW_PREP.md)** — a self-contained study guide (pitch, walkthrough
+script, design-decision defenses, and a question bank).
 
 > **The brief:** A company runs a customer support platform. Customers raise support
 > tickets ("cases"), agents work them, and leadership wants dashboards answering:
@@ -33,6 +42,8 @@ Each layer has one job and can evolve independently in production.
 
 ### Data model — star schema
 
+![Star-schema data model: fact_cases at the centre, joined to dim_customer, dim_agent and dim_date](Data_Model.png)
+
 ```
               dim_date
                  │
@@ -43,8 +54,9 @@ Each layer has one job and can evolve independently in production.
 - **Why a star schema?** Single source system, read-heavy BI workload. Snowflake (columnar)
   and Power BI are both optimised for it. Data Vault only pays off at 10+ sources; 3NF is
   for OLTP write workloads.
-
-See [`Data_Model.png`](Data_Model.png) for the full diagram.
+- **`dim_date` is a role-playing dimension** — the fact carries both `created_date_key` and
+  `closed_date_key`, so the *same* date dimension is joined twice (once as "created", once as
+  "closed"). That's why the diagram shows two links into `dim_date`.
 
 ---
 
@@ -67,6 +79,7 @@ See [`Data_Model.png`](Data_Model.png) for the full diagram.
 ├── verify_metrics.py             # Reproduces every headline number from the CSVs
 ├── INTERVIEW_PREP.md             # Self-contained interview prep module (start here)
 ├── presentation_reference.md     # Original talking-points / speaker notes
+├── LICENSE                       # MIT
 └── README.md
 ```
 
@@ -168,6 +181,31 @@ The story isn't the averages — it's that **Urgent cases resolve *slower* than 
 *least often***. That points at a triage/routing problem, not a capacity one. **Caveat:** only
 38 resolved cases survive the DQ filter, so priority-level averages are directional, not
 statistically significant — worth stating out loud in the interview.
+
+### Reproduce every number
+
+No Snowflake account needed — [`verify_metrics.py`](verify_metrics.py) mirrors the pipeline's
+logic in plain Python and recomputes all of the above straight from the CSVs:
+
+```console
+$ python3 verify_metrics.py
+Row counts        : cases=200  customers=150  agents=40
+
+Data quality
+  closed_no_timestamp : 9
+  status_ts_mismatch  : 123
+  has_any_dq_flag     : 132
+  clean rows          : 68
+
+Overall avg resolution: 96.8 h (~4.03 days) over 38 resolved clean cases
+
+Avg resolution by priority (clean, resolved)
+  Low        126.3 h   (n=9)
+  Medium     113.5 h   (n=13)
+  High        53.7 h   (n=11)
+  Urgent      94.8 h   (n=5)
+  ...
+```
 
 ---
 
