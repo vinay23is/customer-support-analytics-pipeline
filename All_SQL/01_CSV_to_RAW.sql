@@ -1,7 +1,5 @@
 --- Created a STAGE LAYER where I can just load the RAW csv
 
-LIST @DEMO_DB.PUBLIC.CSV;
-
 -- first let me check what files we have in the stage
 LIST @DEMO_DB.PUBLIC.CSV;
 

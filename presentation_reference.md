@@ -75,8 +75,8 @@ CSV Files  →  RAW  →  STAGING  →  DIMENSIONS  →  FACT TABLE
 | Issue | Rows | Decision |
 |---|---|---|
 | Closed — no `closed_at` | **9** | Flag. `resolution_hours = NULL`. Row stays. |
-| Open/In Progress — has `closed_at` | **76** | Flag. Status is source of truth. |
-| NULL `closed_at` on Open/On Hold | 39 | Expected. No flag needed. |
+| Open/On Hold/In Progress — has `closed_at` | **123** | Flag. Status is source of truth. |
+| Non-closed with NULL `closed_at` | 30 | Expected. No flag needed. |
 | Orphan customer / agent | 0 | Check still runs every load. |
 
 **Rule: Flag dirty rows. Never delete. Filter `has_any_dq_flag = FALSE` in every KPI.**
@@ -113,7 +113,7 @@ dim_customer — fact_cases — dim_agent
 | `dq_flag_status_ts_mismatch` | 123 | Status and timestamp contradict |
 | `dq_flag_orphan_customer` | 0 | customer_id not in dim_customer |
 | `dq_flag_orphan_agent` | 0 | agent_id not in dim_agent |
-| **`has_any_dq_flag`** | **85** | **Summary — filter FALSE for all KPIs** |
+| **`has_any_dq_flag`** | **132** | **Summary — filter FALSE for all KPIs** |
 
 ---
 
@@ -121,14 +121,14 @@ dim_customer — fact_cases — dim_agent
 
 | Finding | Value |
 |---|---|
-| Overall avg resolution | **96.8 hours — 4 days** |
+| Overall avg resolution | **96.8 hours — 4 days** (38 resolved clean cases) |
 | Fastest priority | High — **53.7 hours** |
 | Slowest priority | Low — **126.3 hours** |
-| ⚠️ Counterintuitive | **Urgent (95h) slower than High (54h)** — routing problem |
+| ⚠️ Counterintuitive | **Urgent (94.8h) slower than High (53.7h)** + **lowest closure rate (14.6%)** — routing problem |
 | Best team | Tier 2 — **60.9 hours** |
-| Slowest team | Tier 1 — **130.1 hours** (2× slower — workload design issue) |
+| Slowest team | Tier 1 — **147.6 hours** (~2.4× slower — workload design issue) |
 | Highest volume | LATAM — **62 cases** |
-| Lowest closure rate | LATAM — **23%** |
+| Lowest closure rate | North America **18.4%**, LATAM **19.4%** |
 
 ---
 
@@ -168,8 +168,9 @@ dim_customer — fact_cases — dim_agent
 |---|---|
 | Cases / Customers / Agents | 200 / 150 / 40 |
 | DQ: Closed no timestamp | **9 rows** |
-| DQ: Status mismatch | **76 rows** |
+| DQ: Status mismatch | **123 rows** |
+| DQ: Any flag (has_any) | **132 rows** · **68 clean**, 38 resolved |
 | Avg resolution | **96.8 hours** |
-| Tier 2 vs Tier 1 | **60.9h vs 130.1h** |
-| High vs Urgent | **53.7h vs 95h** ← counterintuitive |
-| LATAM | **62 cases, 23% closure** |
+| Tier 2 vs Tier 1 | **60.9h vs 147.6h** |
+| High vs Urgent | **53.7h vs 94.8h** ← counterintuitive |
+| LATAM | **62 cases, 19.4% closure** |

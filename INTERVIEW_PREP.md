@@ -80,11 +80,11 @@ Practice this until it's natural. It's the spine of the whole interview.
 | Region volume (highest) | LATAM **62 cases** |
 | Closure rate by priority (lowest) | **Urgent 14.6%** |
 
-> ⚠️ These come from `verify_metrics.py` against the CSVs in this repo. Some differ slightly
-> from the older `presentation_reference.md` (e.g. it says status-mismatch 76 and Tier 1
-> 130.1 h) — **trust the numbers here**, they match the data and the SQL. If asked, that's a
-> great answer: *"I re-derived every figure from the source and shipped the script, so the
-> numbers are reproducible."*
+> ⚠️ Every number here comes from `verify_metrics.py` run against the CSVs in this repo, and
+> the README and `presentation_reference.md` now match it. An earlier draft of the deck had a
+> few wrong figures (status-mismatch as 76, Tier 1 as 130.1 h); I re-derived everything from
+> the source and corrected them. If asked, that's a strong answer: *"I re-derived every figure
+> from the raw data and shipped the script, so the numbers are reproducible."*
 
 ---
 
@@ -298,8 +298,9 @@ Naming the limits yourself reads as senior; being caught out by them reads as ju
 - **Static, single source.** No CDC / incremental watermark yet — I load the full set. The
   `MERGE` makes that safe to rerun, but a real incremental strategy would key off an
   updated-at column.
-- **`presentation_reference.md` has a couple of stale figures.** I re-derived everything in
-  `verify_metrics.py`; the README and this guide use the reproducible numbers.
+- **The numbers are only as good as one dataset snapshot.** Every figure is reproducible via
+  `verify_metrics.py`, and all the docs now agree — but they describe this 200-row static
+  extract, not a production trend. I'd re-validate on a live, larger window before acting.
 
 ---
 
