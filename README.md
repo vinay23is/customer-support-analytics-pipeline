@@ -64,9 +64,15 @@ See [`Data_Model.png`](Data_Model.png) for the full diagram.
 │   └── agents.csv                # 40 rows
 ├── Data_Model.png                # Star-schema diagram
 ├── Case_Study_Presentation_PPT.pptx
-├── presentation_reference.md     # Interview talking-points / speaker notes
+├── verify_metrics.py             # Reproduces every headline number from the CSVs
+├── INTERVIEW_PREP.md             # Self-contained interview prep module (start here)
+├── presentation_reference.md     # Original talking-points / speaker notes
 └── README.md
 ```
+
+> **Preparing for the interview?** Read [`INTERVIEW_PREP.md`](INTERVIEW_PREP.md) — it's a
+> self-contained study guide: the elevator pitch, a walkthrough script, a bank of likely
+> questions with strong answers, and the numbers to memorise.
 
 ---
 
@@ -100,23 +106,27 @@ Escalations).
 | Issue | Rows | Decision |
 |-------|-----:|----------|
 | Closed status, but no `closed_at` | **9** | Flag. `resolution_hours = NULL`. Keep the row. |
-| Open / In Progress, but has a `closed_at` | **76** | Flag. **Status is the source of truth.** |
-| `NULL closed_at` on Open / On Hold | 39 | Expected — no flag needed. |
+| Open / On Hold / In Progress, but has a `closed_at` | **123** | Flag. **Status is the source of truth.** |
+| Non-closed with `NULL closed_at` | 30 | Expected — no flag needed. |
 | Orphan customer / agent (bad FK) | 0 | Check still runs every load. |
 
 **Rule: flag dirty rows, never delete them.** Deleting hides the upstream bug; flagging
 surfaces it. Every KPI query filters `has_any_dq_flag = FALSE`.
+
+Of 200 cases, **132 carry at least one DQ flag** and **68 are clean** — of which **38** are
+resolved (Closed with a valid `closed_at`) and feed the resolution-time KPIs. Every number
+in this README is reproducible with [`verify_metrics.py`](verify_metrics.py).
 
 ### DQ flags carried through to the fact table
 
 | Flag | Count | Catches |
 |------|------:|---------|
 | `dq_flag_closed_no_timestamp` | 9 | Closed status with no close time |
-| `dq_flag_status_ts_mismatch` | 76 | Status and timestamp contradict each other |
+| `dq_flag_status_ts_mismatch` | 123 | Status and timestamp contradict each other |
 | `dq_flag_invalid_created_at` | 0 | `created_at` couldn't be parsed |
 | `dq_flag_orphan_customer` | 0 | `customer_id` not in `dim_customer` |
 | `dq_flag_orphan_agent` | 0 | `agent_id` not in `dim_agent` |
-| **`has_any_dq_flag`** | **85** | Summary flag — filter `FALSE` for all KPIs |
+| **`has_any_dq_flag`** | **132** | Summary flag — filter `FALSE` for all KPIs |
 
 ---
 
@@ -144,17 +154,20 @@ surfaces it. Every KPI query filters `has_any_dq_flag = FALSE`.
 
 | Finding | Value |
 |---------|-------|
-| Overall average resolution | **96.8 hours (~4 days)** |
+| Overall average resolution | **96.8 hours (~4 days)** — over 38 resolved clean cases |
 | Fastest priority | High — **53.7 h** |
 | Slowest priority | Low — **126.3 h** |
-| ⚠️ Counterintuitive | **Urgent (95 h) slower than High (54 h)** → routing problem |
+| ⚠️ Counterintuitive #1 | **Urgent (94.8 h) resolves slower than High (53.7 h)** → routing problem |
+| ⚠️ Counterintuitive #2 | **Urgent has the *lowest* closure rate (14.6%)** of any priority |
 | Best team | Tier 2 — **60.9 h** |
-| Slowest team | Tier 1 — **130.1 h** (2× slower → workload-design issue) |
+| Slowest team | Tier 1 — **147.6 h** (~2.4× slower → workload-design issue) |
 | Highest volume region | LATAM — **62 cases** |
-| Lowest closure rate | LATAM — **23%** |
+| Lowest closure rates | North America **18.4%**, LATAM **19.4%** |
 
-The interesting story isn't the averages — it's that **Urgent cases resolve slower than High**,
-which points at a triage/routing issue rather than a capacity one.
+The story isn't the averages — it's that **Urgent cases resolve *slower* than High and close
+*least often***. That points at a triage/routing problem, not a capacity one. **Caveat:** only
+38 resolved cases survive the DQ filter, so priority-level averages are directional, not
+statistically significant — worth stating out loud in the interview.
 
 ---
 
