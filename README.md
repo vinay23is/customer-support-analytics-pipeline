@@ -33,10 +33,10 @@ CSV files  ─▶  RAW  ─▶  STAGING  ─▶  DIMENSIONS  ─▶  FACT TABLE 
 
 | Layer | Single responsibility |
 |-------|----------------------|
-| **Raw** | Land the CSVs as-is. Everything `VARCHAR`. Never fail on load. |
-| **Staging** | Parse types, normalise values, compute resolution time + all DQ flags. |
-| **Dimensions** | Clean lookup tables — `dim_customer`, `dim_agent`, `dim_date` (SCD2-ready). |
-| **Fact** | One analytics-ready row per case. No joins needed at query time. |
+| **Raw** | Minimally transformed landing layer. Fields stay `VARCHAR`; ingestion metadata (`_loaded_at`, `_source_file`) is added, empty values are standardised to `NULL`, and spaces trimmed. Designed to tolerate source-format issues (`ON_ERROR = 'CONTINUE'`) without failing the whole batch. |
+| **Staging** | Parse types, normalise values, compute resolution time + the DQ flags. |
+| **Dimensions** | Clean lookup tables — `dim_customer`, `dim_agent`, `dim_date` (SCD2 columns present, see below). |
+| **Fact** | One analytics-ready row per case. No joins needed for the common queries. |
 
 Each layer has one job and can evolve independently in production.
 
@@ -50,10 +50,13 @@ Each layer has one job and can evolve independently in production.
   dim_customer ─ fact_cases ─ dim_agent
 ```
 
-- **Grain:** one row per case — `case_id` is the primary key.
-- **Why a star schema?** Single source system, read-heavy BI workload. Snowflake (columnar)
-  and Power BI are both optimised for it. Data Vault only pays off at 10+ sources; 3NF is
-  for OLTP write workloads.
+- **Grain:** one row per case — `case_id` is the business key for the fact.
+- **Why a star schema?** A star schema fits this exercise: a small number of stable source
+  files and a read-heavy BI workload, which Snowflake's columnar storage and Power BI both
+  handle well. A Data Vault layer would add modelling and operational complexity without
+  enough benefit at this scope. A highly normalised 3NF model would preserve source
+  relationships well but require more joins for the BI questions here, so a star schema is
+  simpler for analytical consumption.
 - **`dim_date` is a role-playing dimension** — the fact carries both `created_date_key` and
   `closed_date_key`, so the *same* date dimension is joined twice (once as "created", once as
   "closed"). That's why the diagram shows two links into `dim_date`.
@@ -124,7 +127,14 @@ Escalations).
 | Orphan customer / agent (bad FK) | 0 | Check still runs every load. |
 
 **Rule: flag dirty rows, never delete them.** Deleting hides the upstream bug; flagging
-surfaces it. Every KPI query filters `has_any_dq_flag = FALSE`.
+surfaces it. Flagged rows are loaded into the fact table and filtered *per metric*:
+
+- **Resolution-time KPIs use clean records only** (`has_any_dq_flag = FALSE`, and a valid
+  `resolution_hours`). A contradictory or incomplete timestamp can't be trusted to measure
+  duration, so those rows are excluded.
+- **Volume and status-based closure metrics use all cases**, because `status` is treated as
+  the source of truth. A case counts toward volume and closure regardless of a stray
+  timestamp — the timestamp problem is what the flag records, not the status.
 
 Of 200 cases, **132 carry at least one DQ flag** and **68 are clean** — of which **38** are
 resolved (Closed with a valid `closed_at`) and feed the resolution-time KPIs. Every number
@@ -139,27 +149,35 @@ in this README is reproducible with [`verify_metrics.py`](verify_metrics.py).
 | `dq_flag_invalid_created_at` | 0 | `created_at` couldn't be parsed |
 | `dq_flag_orphan_customer` | 0 | `customer_id` not in `dim_customer` |
 | `dq_flag_orphan_agent` | 0 | `agent_id` not in `dim_agent` |
-| **`has_any_dq_flag`** | **132** | Summary flag — filter `FALSE` for all KPIs |
+| **`has_any_dq_flag`** | **132** | Summary flag — filtered `FALSE` for resolution-time KPIs |
 
 ---
 
 ## Key design decisions
 
 - **Surrogate keys** (`sk_customer`, `sk_agent`) instead of natural varchar keys — if source
-  IDs get reused or changed, integer surrogates keep historical joins stable.
-- **Denormalised `region` and `team`** into the fact table — zero joins for the most common
-  BI queries. On a columnar warehouse, wide beats normalised-with-joins.
+  IDs get reused or changed, integer surrogates keep dimension joins stable.
+- **Denormalised `region` and `team`** into the fact table — denormalising these frequently
+  used attributes reduces joins for the main dashboard queries. Snowflake's columnar storage
+  makes that trade-off practical for this workload.
 - **`LEFT JOIN` in the fact MERGE, not `INNER JOIN`** — an inner join silently drops orphan
   rows; a left join keeps them and lets the DQ flag surface them.
-- **`MERGE` everywhere, not `INSERT`** — the pipeline is idempotent. Rerun it safely after
-  any failure; no duplicates.
+- **Idempotent loading patterns throughout** — staging and the fact table use `MERGE`; the
+  customer/agent SCD2 dimensions use expire-and-insert logic; the date dimension is generated
+  deterministically with `CREATE OR REPLACE`. RAW loads with `COPY INTO`. Reruns don't
+  duplicate rows.
 - **Fixed step order** — `stg_customers` → `stg_agents` → `stg_cases` (cases left-join to
   both, so it runs last).
 - **`TRY_TO_TIMESTAMP_NTZ`** — a bad timestamp becomes `NULL`, never a pipeline crash.
 - **`EMPTY_FIELD_AS_NULL = TRUE`** — without it, an empty `closed_at` loads as `''` not
   `NULL`, and every DQ check silently breaks.
-- **SCD2 columns** (`valid_from` / `valid_to` / `is_current`) already on the dimensions —
-  history-ready with no future DDL change.
+- **SCD2-ready dimensions** — `dim_customer` and `dim_agent` carry `valid_from` / `valid_to` /
+  `is_current`, so they're structured to track history later **without a schema redesign**.
+  The current load is a first-time insert and the fact joins only to `is_current = TRUE`, so
+  full as-of historical tracking is *designed for*, not yet exercised.
+- **Primary key is informational** — Snowflake standard tables don't enforce PK/unique
+  constraints. `case_id` uniqueness in the fact is guaranteed by the `MERGE` keying on
+  `case_id`, not by the engine.
 
 ---
 
@@ -185,7 +203,11 @@ statistically significant — worth stating out loud in the interview.
 ### Reproduce every number
 
 No Snowflake account needed — [`verify_metrics.py`](verify_metrics.py) mirrors the pipeline's
-logic in plain Python and recomputes all of the above straight from the CSVs:
+logic in plain Python and recomputes the figures straight from the CSVs. It applies the **same
+population rules as the SQL**: the five DQ flags, resolution-time metrics on clean + resolved
+rows only, and volume/closure on all cases. It independently reproduces the DQ-flag counts,
+clean/resolved row counts, overall and by-priority/team average resolution, and region volume
+and closure rates.
 
 ```console
 $ python3 verify_metrics.py
@@ -211,23 +233,54 @@ Avg resolution by priority (clean, resolved)
 
 ## How to run (Snowflake)
 
-1. Create a database (the scripts assume `DEMO_DB`) and upload the three CSVs to a stage
-   named `@DEMO_DB.PUBLIC.CSV`.
-2. Run the SQL files **in order**:
+**Prerequisites**
 
-   | Step | File | Does |
-   |------|------|------|
-   | 1 | `All_SQL/01_CSV_to_RAW.sql` | Creates `raw` / `stg` / `dim` / `facts` schemas, raw tables, file format, and `COPY INTO` loads. |
-   | 2 | `All_SQL/02_Staging_Layer.sql` | Parses types, normalises, computes `resolution_hours` and the five DQ flags. |
-   | 3 | `All_SQL/03_Dim_layer.sql` | Builds `dim_customer`, `dim_agent`, and a 2020–2030 `dim_date`. |
-   | 4 | `All_SQL/04_Analytics_layer.sql` | MERGEs `fact_cases` and runs post-load validation. |
-   | 5 | `All_SQL/05_Analytics_query.sql` | The business-question queries. |
+- A Snowflake account and a running **warehouse** with rights to create schemas, tables, and
+  file formats, and to load and query data.
+- A database named **`DEMO_DB`**.
+- A stage named **`@DEMO_DB.PUBLIC.CSV`** with the three CSVs uploaded:
+  `agents.csv`, `customers.csv`, `cases.csv`.
 
-3. Point Power BI / Tableau at `FACTS.FACT_CASES`.
+**Execution context.** The scripts use partially qualified names (`stg.stg_cases`,
+`dim.dim_customer`, `facts.fact_cases`), so each one begins with `USE DATABASE DEMO_DB;` to
+avoid running in the wrong database. Set your warehouse (`USE WAREHOUSE <your_warehouse>;`)
+before running.
 
-> **Note:** `04_Analytics_layer.sql` contains a `TRUNCATE` that is **commented out on
-> purpose** — it was a testing leftover that, if run, would empty the fact table right after
-> it's built (making every validation check return 0). Left in, commented, for transparency.
+Run the SQL files **in order**:
+
+| Step | File | Does |
+|------|------|------|
+| 1 | `All_SQL/01_CSV_to_RAW.sql` | Creates `raw` / `stg` / `dim` / `facts` schemas, raw tables, file format, and `COPY INTO` loads. |
+| 2 | `All_SQL/02_Staging_Layer.sql` | Parses types, normalises, computes `resolution_hours` and the DQ flags. |
+| 3 | `All_SQL/03_Dim_layer.sql` | Builds `dim_customer`, `dim_agent`, and a 2020–2030 `dim_date`. |
+| 4 | `All_SQL/04_Analytics_layer.sql` | MERGEs `fact_cases` and runs post-load validation. |
+| 5 | `All_SQL/05_Analytics_query.sql` | The business-question queries. |
+
+Then point Power BI / Tableau at `DEMO_DB.FACTS.FACT_CASES`.
+
+### Expected validation results
+
+Use these to confirm each step worked:
+
+```text
+RAW
+  cases       200
+  customers   150
+  agents       40
+
+STAGING
+  DQ flagged  132
+  clean        68
+
+DIMENSIONS
+  customers   150
+  agents       40
+  dates      4018
+
+FACT
+  cases                                              200
+  clean resolved cases (used for resolution KPIs)     38
+```
 
 ---
 
@@ -235,11 +288,40 @@ Avg resolution by priority (clean, resolved)
 
 | Concern | Approach |
 |---------|----------|
-| Volume | Incremental `MERGE`; cluster the fact on `created_date_key`; Snowflake auto-scale. |
+| Volume | Incremental `MERGE` keyed on an updated-at watermark; cluster the fact on `created_date_key`; Snowflake auto-scale. |
 | Orchestration | Snowflake Tasks with the fixed step order; alert on the first failure. |
 | Schema changes | Add columns as `NULLABLE` to RAW first; never drop without a deprecation window. |
 | Monitoring | Track row counts, DQ-flag %, negative resolution hours, and orphan keys — alert *before* dashboards load. |
-| History | SCD2 columns already present — turn on history tracking with no DDL change. |
+| History | Dimensions already carry SCD2 columns, so as-of historical tracking can be turned on without a schema redesign (the fact join would move from `is_current = TRUE` to a date-ranged lookup). |
+
+---
+
+## Design assumptions
+
+- **`status` is the source of truth for closure-rate reporting.** When `status` and a
+  timestamp disagree, `status` wins and the row is flagged.
+- **A valid `resolution_hours` requires all of:** `status = 'Closed'`, a parseable
+  `created_at`, a parseable `closed_at`, and `closed_at > created_at`. Anything else leaves
+  `resolution_hours` NULL.
+- **Dirty rows are preserved and flagged, not deleted** — so counts stay honest and the
+  upstream problem stays visible.
+- **Resolution-time KPIs exclude DQ-flagged rows**; volume and closure metrics do not.
+
+Because only **38 clean resolved cases** feed the resolution-time KPIs, priority- and
+team-level averages are **directional, not statistically significant** — worth saying out loud
+rather than presenting them as firm conclusions.
+
+---
+
+## Future improvements
+
+- **Two timestamp DQ flags not yet implemented** (both are 0 in this dataset, so nothing is
+  hidden today): `dq_flag_invalid_closed_at` for a non-null `closed_at` that fails to parse,
+  and `dq_flag_invalid_resolution_order` for `closed_at <= created_at`. Today the pipeline
+  relies on `resolution_hours` being NULL in those cases rather than raising an explicit flag.
+- **Automated tests.** The validation queries in `04_Analytics_layer.sql` are manual
+  `SELECT`s; in production they'd be dbt/Snowflake tests that fail the build.
+- **True incremental load** keyed on an updated-at watermark instead of a full reload.
 
 ---
 

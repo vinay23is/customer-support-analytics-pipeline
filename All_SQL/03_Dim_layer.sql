@@ -1,6 +1,12 @@
--- dimension tables
--- keeping SCD2 columns (valid_from, valid_to, is_current) on both dims
--- not needed for static CSV but good to have ready for production
+-- ============================================================================
+-- 03 - DIMENSIONS
+-- dim_customer, dim_agent, and a generated dim_date.
+-- ============================================================================
+USE DATABASE DEMO_DB;
+
+-- SCD2 columns (valid_from, valid_to, is_current) are carried on both dims.
+-- They are not exercised by this static CSV load, but they let the dimensions
+-- track history later without a schema redesign.
 
 CREATE TABLE IF NOT EXISTS dim.dim_customer (
     sk_customer   INTEGER AUTOINCREMENT PRIMARY KEY,
@@ -158,7 +164,8 @@ WHERE NOT EXISTS (
 SELECT * FROM dim.dim_agent    LIMIT 5;
 SELECT * FROM dim.dim_customer LIMIT 5;
 
--- verify counts - should be 40 agents, 150 customers
-SELECT 'dim_customer' AS tbl, COUNT(*) AS rows FROM dim.dim_customer
+-- verify counts - expected: 150 customers, 40 agents
+-- (ROWS is a reserved word in Snowflake, so the alias is row_count)
+SELECT 'dim_customer' AS tbl, COUNT(*) AS row_count FROM dim.dim_customer
 UNION ALL
-SELECT 'dim_agent'    AS tbl, COUNT(*) AS rows FROM dim.dim_agent;
+SELECT 'dim_agent'    AS tbl, COUNT(*) AS row_count FROM dim.dim_agent;

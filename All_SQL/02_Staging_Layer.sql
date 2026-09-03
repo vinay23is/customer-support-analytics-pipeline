@@ -1,5 +1,10 @@
--- staging layer DDL
--- this is where all the actual work happens
+-- ============================================================================
+-- 02 - STAGING layer
+-- Parses types, normalizes values, and computes resolution time + DQ flags.
+-- This is where the real work happens; RAW only landed strings.
+-- ============================================================================
+USE DATABASE DEMO_DB;
+
 -- parse types, normalize values, compute resolution time and dq flags
 
 CREATE TABLE IF NOT EXISTS stg.stg_cases (
@@ -133,15 +138,18 @@ USING (
             ELSE NULL
         END AS resolution_bucket,
 
-        --- flag 1: closed but no closed_at - genuine upstream bug (9 rows in our dataset)
+        -- flag 1: Closed but no closed_at - genuine upstream bug (expected: 9 rows)
         CASE WHEN TRIM(c.status) = 'Closed' AND c.closed_at IS NULL
              THEN TRUE ELSE FALSE END AS dq_flag_closed_no_timestamp,
 
-        ---- flag 2: open/in progress but has a closed_at - status and timestamp disagree
+        -- flag 2: non-closed status but a closed_at is present - status and timestamp
+        -- disagree; we treat status as the source of truth (expected: 123 rows)
         CASE WHEN TRIM(c.status) IN ('Open', 'On Hold', 'In Progress') AND c.closed_at IS NOT NULL
              THEN TRUE ELSE FALSE END AS dq_flag_status_ts_mismatch,
 
-        ---- flag 3: created_at string could not be parsed at all
+        -- flag 3: created_at string could not be parsed (expected: 0 rows)
+        -- Note: closed_at parseability and closed_at <= created_at are NOT yet
+        -- flagged here - both are 0 in this dataset. See README "Future improvements".
         CASE WHEN TRY_TO_TIMESTAMP_NTZ(c.created_at) IS NULL
              THEN TRUE ELSE FALSE END AS dq_flag_invalid_created_at,
 

@@ -1,8 +1,15 @@
--- fact table DDL
--- grain = one row per case, case_id is the natural PK
--- surrogate keys for customer and agent so SCD changes don't break history
---- region and team are denormalised in here to avoid joins on common queries
--- all dq flags carried through from staging for transparency
+-- ============================================================================
+-- 04 - FACT table + post-load validation
+-- Grain: one row per case. case_id is the business key.
+-- Surrogate keys for customer/agent so dimension changes don't break history.
+-- region and team are denormalized in to avoid joins on the common queries.
+-- All DQ flags are carried through from staging so KPIs can filter on them.
+--
+-- Note on PRIMARY KEY: Snowflake standard tables do NOT enforce PK uniqueness -
+-- the constraint is informational (useful for BI tools and readers). Uniqueness
+-- here is guaranteed by the MERGE keying on case_id, not by the engine.
+-- ============================================================================
+USE DATABASE DEMO_DB;
 
 CREATE TABLE IF NOT EXISTS facts.fact_cases (
     case_id                     VARCHAR(10)  NOT NULL,
@@ -35,9 +42,12 @@ CREATE TABLE IF NOT EXISTS facts.fact_cases (
 
 
 -- fact merge
---- joins to current dim rows only (is_current = TRUE) to get the right surrogate keys
--- update only fires when something actually changed - keeps _updated_at meaningful
--- dq-flagged rows go in too, they just get filtered out at query time with has_any_dq_flag = FALSE
+-- Joins to current dim rows only (is_current = TRUE) to pick up the right surrogate keys.
+-- On a match we refresh every mutable column. An earlier version only checked a subset
+-- (status, closed_at, resolution_hours, keys) in WHEN MATCHED AND (...), which meant a
+-- change to priority, category, created_at or a DQ flag would be silently missed on rerun.
+-- At this scale, refreshing all columns is the correct, simplest behaviour.
+-- DQ-flagged rows are loaded too; KPIs filter them out with has_any_dq_flag = FALSE.
 MERGE INTO facts.fact_cases AS tgt
 USING (
     SELECT
@@ -73,14 +83,7 @@ USING (
     LEFT JOIN dim.dim_agent    da ON da.agent_id    = sc.agent_id    AND da.is_current = TRUE
 ) AS src
 ON tgt.case_id = src.case_id
-WHEN MATCHED AND (
-    tgt.status           <> src.status                         OR
-    tgt.closed_at        IS DISTINCT FROM src.closed_at        OR
-    tgt.resolution_hours IS DISTINCT FROM src.resolution_hours OR
-    tgt.sk_customer      IS DISTINCT FROM src.sk_customer      OR
-    tgt.sk_agent         IS DISTINCT FROM src.sk_agent
-)
-THEN UPDATE SET
+WHEN MATCHED THEN UPDATE SET
     tgt.sk_customer                     = src.sk_customer,
     tgt.sk_agent                        = src.sk_agent,
     tgt.created_date_key                = src.created_date_key,
@@ -129,18 +132,16 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 
--- post-load validation - run these after every pipeline execution
--- in production these become automated tests with alerts on failure
+-- ----------------------------------------------------------------------------
+-- Post-load validation. Run after every load; in production these become
+-- automated tests that alert on failure. Expected results are noted per check.
+-- ----------------------------------------------------------------------------
 
--- NOTE: this TRUNCATE was a leftover from testing and must NOT run here -
--- it would wipe the fact table we just built and make every check below return 0.
--- Kept commented out for transparency.
--- Truncate table facts.fact_cases;
-
------- check 1: make sure something actually loaded
+-- check 1: something actually loaded (expected: 200)
 SELECT COUNT(*) AS fact_row_count FROM facts.fact_cases;
 
--- check 2: dq summary - want to see all flag counts and overall %
+-- check 2: DQ flag counts (expected: closed_no_ts=9, status_ts_mismatch=123,
+--          orphans=0, total_dq_flagged=132, i.e. 66% of 200)
 SELECT
     SUM(CASE WHEN dq_flag_closed_no_timestamp THEN 1 ELSE 0 END) AS closed_no_ts,
     SUM(CASE WHEN dq_flag_status_ts_mismatch  THEN 1 ELSE 0 END) AS status_ts_mismatch,
@@ -151,26 +152,28 @@ SELECT
     ROUND(SUM(CASE WHEN has_any_dq_flag THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS dq_flag_pct
 FROM facts.fact_cases;
 
------ check 3: no negative resolution times
+-- check 3: no negative resolution times (expected: 0)
 SELECT COUNT(*) AS negative_resolution_rows
 FROM facts.fact_cases
 WHERE resolution_hours < 0;
 
--- check 4: closed cases with no resolution time - this should match the 9 upstream bug rows
+-- check 4: Closed cases with no resolution time (expected: 9 - the closed_no_timestamp rows)
 SELECT COUNT(*) AS closed_missing_resolution
 FROM facts.fact_cases
 WHERE status = 'Closed'
   AND resolution_hours IS NULL;
 
--- check 5: orphan surrogate keys - should be zero
+-- check 5: orphan surrogate keys (expected: 0 for both)
 SELECT COUNT(*) AS unmatched_customers FROM facts.fact_cases WHERE sk_customer IS NULL;
 SELECT COUNT(*) AS unmatched_agents    FROM facts.fact_cases WHERE sk_agent    IS NULL;
 
---- check 6: sanity check on resolution by priority
----- clean rows only - has_any_dq_flag = FALSE
+-- check 6: sanity check - avg resolution by priority
+-- Population: clean + resolved only. resolution_hours is non-null only for clean
+-- Closed rows, so AVG already excludes flagged/unresolved cases; is_resolved count
+-- is shown alongside. (expected order slowest->fastest: Low, Medium, Urgent, High)
 SELECT
     priority,
-    COUNT(*)                                     AS total_cases,
+    COUNT(*)                                     AS clean_cases,
     SUM(CASE WHEN is_resolved THEN 1 ELSE 0 END) AS resolved_cases,
     ROUND(AVG(resolution_hours), 1)              AS avg_resolution_hours,
     MIN(resolution_hours)                        AS min_hours,

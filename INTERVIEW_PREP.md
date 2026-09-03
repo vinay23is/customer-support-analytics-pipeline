@@ -27,7 +27,8 @@
 > Dimensions → Fact** — landing in a **star schema** with `fact_cases` at the centre. The key
 > theme is **data quality**: I profiled the files first, found that the `status` and
 > `closed_at` columns contradict each other on 132 of 200 rows, and chose to **flag those
-> rows, not delete them**, so every KPI runs on trustworthy data while the pipeline stays
+> rows, not delete them** — so resolution-time KPIs run on clean rows only, while volume and
+> closure still count every case with status as the source of truth. The pipeline stays
 > transparent about what it doesn't trust. The output answers every question in the brief —
 > resolution time, volume, agent and regional performance — with **no joins at query time**."
 
@@ -45,13 +46,15 @@ Practice this until it's natural. It's the spine of the whole interview.
    quality problems that shaped everything downstream."
 
 3. **The four layers.**
-   - *Raw* — "Land the CSVs exactly as they are, every column a `VARCHAR`. The raw layer's
-     only job is to never fail on load, so a bad value never blocks ingestion."
+   - *Raw* — "A minimally transformed landing layer: every column stays `VARCHAR`, I add
+     ingestion metadata and standardise empties to `NULL`, and I load with `ON_ERROR =
+     CONTINUE` so a bad row is tolerated instead of failing the whole batch."
    - *Staging* — "This is where the real work happens: parse timestamps with `TRY_TO_*` so a
      bad value becomes `NULL` instead of crashing, normalise text, compute `resolution_hours`,
      and raise the five data-quality flags."
    - *Dimensions* — "Clean lookup tables — customer, agent, and a generated date dimension —
-     each with SCD2 columns so they're history-ready in production."
+     with SCD2 columns on customer and agent so they're structured to track history later
+     without a schema redesign."
    - *Fact* — "One row per case. Surrogate keys to the dimensions, plus `region` and `team`
      denormalised in so the common BI queries need zero joins."
 
@@ -120,15 +123,15 @@ then the alternative you rejected.
 
 | Decision | Why | Alternative rejected |
 |----------|-----|---------------------|
-| **Star schema** | Single source, read-heavy BI. Snowflake (columnar) + Power BI are built for it. | *Data Vault* — only pays off at 10+ sources. *3NF* — for OLTP writes, forces joins on reads. |
+| **Star schema** | Few stable source files, read-heavy BI; Snowflake (columnar) + Power BI handle it well. | *Data Vault* — adds modelling/ops complexity without enough benefit at this scope. *3NF* — preserves source relationships but needs more joins for these BI questions. |
 | **Surrogate keys** (`sk_customer`, `sk_agent`) | Integer keys stay stable if a source ID is reused or changed; history never breaks. | Natural varchar keys — brittle, and slower to join. |
-| **Denormalise `region` + `team` into the fact** | The most common queries ("cases by region") then need **zero joins**; wide tables win on columnar stores. | Keep them only in dims — forces a join on every dashboard query. |
+| **Denormalise `region` + `team` into the fact** | The analytics queries then hit a single table with **no joins**; Snowflake's columnar storage makes that trade-off practical here. | Keep them only in dims — forces a join on every dashboard query. |
 | **`LEFT JOIN` in the fact MERGE** | Keeps orphan cases and lets the DQ flag surface them. | `INNER JOIN` — silently *drops* orphans; you'd never know the case existed. |
-| **`MERGE`, not `INSERT`** | Idempotent — rerun safely after any failure, no duplicates. | `INSERT` — reruns double-load the data. |
+| **Idempotent loading patterns** | Staging + fact use `MERGE`; SCD2 dims expire-and-insert; date dim is `CREATE OR REPLACE`; RAW uses `COPY INTO`. Reruns don't duplicate. | Blind `INSERT` everywhere — reruns double-load the data. |
 | **Fixed step order** (customers → agents → cases) | `stg_cases` left-joins to both to detect orphans, so they must exist first. | Arbitrary order — orphan checks would misfire. |
 | **`TRY_TO_TIMESTAMP_NTZ`** | A bad timestamp becomes `NULL`, not a crash. | `TO_TIMESTAMP` — one bad row fails the whole load. |
 | **`EMPTY_FIELD_AS_NULL = TRUE`** | Empty `closed_at` loads as `NULL`, so `IS NULL` checks work. | Default — empty loads as `''` and every DQ check silently breaks. |
-| **SCD2 columns on dims** (`valid_from`/`valid_to`/`is_current`) | History-ready with no future DDL change. | Add later — a migration on a live table. |
+| **SCD2 columns on dims** (`valid_from`/`valid_to`/`is_current`) | Structured so as-of history can be enabled later without a schema redesign (not yet exercised; fact joins to `is_current = TRUE`). | Add later — a migration on a live table. |
 | **Flag, don't delete** dirty rows | Transparency; the pipeline shows what it doesn't trust. | Delete — hides the upstream bug. |
 
 ---
@@ -204,9 +207,12 @@ still there to investigate.
 artefact. I flag the row and treat it as open.
 
 **Q: How is this pipeline idempotent?**
-→ Every load is a `MERGE`, not an `INSERT`. If a step fails halfway and I rerun the whole
-thing, matched rows update in place and unmatched rows insert — no duplicates, no double
-counting. I can safely rerun after any failure.
+→ Each layer uses a rerun-safe pattern rather than blind inserts. Staging and the fact table
+`MERGE` on their key, so matched rows update in place and unmatched rows insert — no
+duplicates. The SCD2 dimensions use expire-and-insert (guarded so an unchanged row isn't
+re-inserted), and the date dimension is `CREATE OR REPLACE`. So if a step fails halfway I can
+rerun the whole thing safely. (RAW's `COPY INTO` would need a truncate-and-reload or a load
+watermark to be fully idempotent — a fair thing to call out.)
 
 **Q: How would you schedule / orchestrate this in production?**
 → Snowflake Tasks in the fixed dependency order (customers → agents → cases → dims → fact),
@@ -257,8 +263,8 @@ live in one place.
   (`DATEADD(DAY, SEQ4(), '2020-01-01')`).
 - **`QUALIFY`** — filter on a window function's result without a subquery (used for
   "top 3 agents per team" via `RANK() OVER (PARTITION BY team …)`).
-- **`IS DISTINCT FROM`** — null-safe inequality; used in the fact MERGE so an update only
-  fires when a value genuinely changed (keeps `_updated_at` meaningful).
+- **`IS DISTINCT FROM`** — null-safe inequality (treats two NULLs as equal, NULL vs value as
+  different). Useful for change detection; the SCD2 dimension logic relies on the same idea.
 - **Surrogate vs natural key** — surrogate = system-generated integer (`AUTOINCREMENT`);
   natural = the business ID (`CU001`). Facts join on surrogates for stability.
 - **SCD Type 2** — keep history by versioning dimension rows with

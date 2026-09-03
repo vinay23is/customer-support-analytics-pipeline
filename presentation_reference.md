@@ -59,12 +59,12 @@ CSV Files  →  RAW  →  STAGING  →  DIMENSIONS  →  FACT TABLE
 
 | Layer | Single Job |
 |---|---|
-| Raw | Land CSV as-is. All strings. Never fail on load. |
+| Raw | Minimally transformed landing. All strings + ingestion metadata; empties → NULL. Tolerates bad rows without failing the batch (`ON_ERROR = CONTINUE`). |
 | Staging | Parse types. Normalise. Compute DQ flags + resolution time. |
 | Dimensions | Clean lookup tables — customer, agent, date. |
 | Fact | One analytics-ready row per case. No joins needed at query time. |
 
-**Choice: Star Schema** — single source system, read-heavy workload. Snowflake and Power BI are both optimised for it. Data Vault adds complexity that only pays off at 10+ sources. 3NF is for OLTP.
+**Choice: Star Schema** — a small number of stable source files and a read-heavy BI workload, which Snowflake (columnar) and Power BI both handle well. Data Vault would add modelling/operational complexity without enough benefit at this scope. A 3NF model preserves source relationships but needs more joins for these BI questions, so a star is simpler for analytical consumption.
 
 ---
 
@@ -79,7 +79,9 @@ CSV Files  →  RAW  →  STAGING  →  DIMENSIONS  →  FACT TABLE
 | Non-closed with NULL `closed_at` | 30 | Expected. No flag needed. |
 | Orphan customer / agent | 0 | Check still runs every load. |
 
-**Rule: Flag dirty rows. Never delete. Filter `has_any_dq_flag = FALSE` in every KPI.**
+**Rule: Flag dirty rows, never delete.** Resolution-time KPIs use clean rows only
+(`has_any_dq_flag = FALSE`); volume and status-based closure metrics use all cases, because
+status is the source of truth.
 
 Deleting hides the upstream bug. Flagging surfaces it.
 
@@ -99,7 +101,7 @@ dim_customer — fact_cases — dim_agent
 
 1. **Surrogate keys** (sk_customer, sk_agent) — not natural varchar keys. If source IDs change or get reused, surrogate integers stay stable. Historical joins never break.
 
-2. **Denormalised region + team** into the fact table — zero joins for the most common BI queries. Snowflake is columnar. Wide tables beat normalised tables with joins.
+2. **Denormalised region + team** into the fact table — fewer joins for the main dashboard queries. Snowflake's columnar storage makes that trade-off practical for this workload.
 
 3. **LEFT JOIN in the fact MERGE, not INNER JOIN** — an INNER JOIN silently drops orphan rows. You'd never know the case existed. LEFT JOIN keeps it, flags it.
 
@@ -113,7 +115,7 @@ dim_customer — fact_cases — dim_agent
 | `dq_flag_status_ts_mismatch` | 123 | Status and timestamp contradict |
 | `dq_flag_orphan_customer` | 0 | customer_id not in dim_customer |
 | `dq_flag_orphan_agent` | 0 | agent_id not in dim_agent |
-| **`has_any_dq_flag`** | **132** | **Summary — filter FALSE for all KPIs** |
+| **`has_any_dq_flag`** | **132** | **Summary — filtered FALSE for resolution-time KPIs** |
 
 ---
 
@@ -134,7 +136,7 @@ dim_customer — fact_cases — dim_agent
 
 ## Pipeline Design Decisions
 
-**MERGE everywhere, not INSERT** → idempotent. Rerun safely after any failure. No duplicates.
+**Idempotent loading patterns** → staging + fact use MERGE; SCD2 dims use expire-and-insert; date dim is generated with CREATE OR REPLACE; RAW uses COPY INTO. Reruns don't duplicate rows.
 
 **Fixed step order** → stg_customers → stg_agents → stg_cases (cases LEFT JOINs to both — run it last)
 
@@ -152,7 +154,7 @@ dim_customer — fact_cases — dim_agent
 | Orchestration | Snowflake Tasks · fixed step order · alert on first failure |
 | Schema changes | Add NULLABLE to RAW first · never drop without deprecation window |
 | Monitoring | Row count · DQ flag % · negative hours · orphan keys — alert before dashboard loads |
-| SCD2 | `valid_from / valid_to / is_current` already on dimensions — history-ready, no DDL change needed |
+| SCD2 | `valid_from / valid_to / is_current` on dimensions — SCD2-ready, so as-of history can be enabled later without a schema redesign (not yet exercised; fact joins to `is_current = TRUE`) |
 
 ---
 

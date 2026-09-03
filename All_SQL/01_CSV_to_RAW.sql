@@ -1,6 +1,13 @@
---- Created a STAGE LAYER where I can just load the RAW csv
+-- ============================================================================
+-- 01 - RAW landing layer
+-- Execution context: everything runs against DEMO_DB. The scripts use partially
+-- qualified names (raw., stg., dim., facts.), so set the database first.
+-- ============================================================================
+USE DATABASE DEMO_DB;
+-- USE WAREHOUSE <your_warehouse>;   -- any running warehouse with load + query rights
 
--- first let me check what files we have in the stage
+-- Prereq: the three CSVs are already uploaded to stage @DEMO_DB.PUBLIC.CSV.
+-- Check what is in the stage before loading.
 LIST @DEMO_DB.PUBLIC.CSV;
 
 
