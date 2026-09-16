@@ -63,8 +63,15 @@ Practice this until it's natural. It's the spine of the whole interview.
    upstream bug, flagging surfaces it. KPIs just filter `has_any_dq_flag = FALSE`."
 
 5. **The payoff.** "The fact table answers every question in the brief with no query-time
-   joins, and it surfaced a real finding: Urgent cases resolve *slower* than High and close
-   *least* often — a routing problem, not a capacity one."
+   joins, and a governed `rpt.*` view layer sits on top for BI. It surfaced a real finding:
+   Urgent cases resolve *slower* than High and close *least* often — a routing problem, not a
+   capacity one."
+
+6. **Why it's production-oriented, not a demo.** "It's orchestrated in Python — one command
+   runs the layers in dependency order with logging, per-step timing and a JSON run manifest —
+   and it's tested: 41 pytest checks encode the data contracts (uniqueness, accepted values,
+   referential integrity) and pin every headline number, all running in CI on each push. So
+   the 'reproducible numbers' claim is enforced, not just stated."
 
 ---
 
@@ -215,9 +222,32 @@ rerun the whole thing safely. (RAW's `COPY INTO` would need a truncate-and-reloa
 watermark to be fully idempotent — a fair thing to call out.)
 
 **Q: How would you schedule / orchestrate this in production?**
-→ Snowflake Tasks in the fixed dependency order (customers → agents → cases → dims → fact),
-with an alert on the first failure. For heavier needs I'd lift it into Airflow or dbt, where
-each layer becomes a model with tests between them.
+→ Today `run_pipeline.py` runs the layers in fixed dependency order (RAW → STAGING → DIMS →
+FACT → REPORTING) with structured logging, per-step timing, row-count capture and a JSON run
+manifest, and a `--dry-run` that validates the plan with no warehouse. In production I'd wrap
+that same step order in Snowflake Tasks (or Airflow/dbt), alert on the first failure, and
+alert off `rpt.data_quality_monitor` before dashboards refresh. Each step is idempotent, so a
+failed run is just re-run.
+
+**Q: How is the pipeline tested?**
+→ A pytest suite runs in CI on every push. It's three layers: **data contracts** on the
+source (key uniqueness, not-null, accepted enum values, referential integrity — the pytest
+equivalents of dbt's `unique`/`not_null`/`accepted_values`/`relationships`), **DQ-rule
+tests** that lock the flag counts (9 · 123 · 132 · 68 · 38), and **metric-regression tests**
+that pin every headline KPI. If a source extract or a transformation moves a documented
+number, CI goes red — that's what makes "reproducible numbers" a guarantee, not a slogan.
+
+**Q: Why a separate reporting view layer instead of querying the fact directly?**
+→ Governance and reuse. `rpt.*` gives BI tools stable, named objects with metric definitions
+(closure rate, SLA attainment, the two populations) defined once, so two analysts can't
+compute "closure rate" two different ways. It's also where I exercise the role-playing
+`dim_date` and the SLA policy table, keeping calendar and SLA logic in one place.
+
+**Q: How would you turn "Urgent is mishandled" into something the business tracks?**
+→ I added `dim_sla_policy` (priority → target hours; Urgent 8h, High 24h, …) and
+`rpt.priority_sla`, which reports SLA attainment per priority. Urgent's tight target plus its
+slow resolution makes the breach rate the KPI that quantifies the routing problem — the
+targets live in a table so the business can tune them without a code change.
 
 **Q: How does this scale to millions of rows?**
 → Incremental `MERGE` on new/changed rows only; cluster the fact on `created_date_key` so date
@@ -303,8 +333,11 @@ Naming the limits yourself reads as senior; being caught out by them reads as ju
 
 - **Small sample.** 200 cases, 38 resolved after the DQ filter. Priority/team averages are
   directional, not significant. I'd want a larger window before acting on them.
-- **No automated tests.** The validation checks in `04_Analytics_layer.sql` are manual
-  `SELECT`s. In production they'd be dbt tests (or Snowflake tasks) that fail the build.
+- **Not yet on dbt.** Testing and orchestration are in place (pytest + `run_pipeline.py` +
+  CI), but the transformations are hand-written SQL, not dbt models. That's the next step —
+  and because the pytest suite already mirrors dbt's `unique` / `not_null` /
+  `accepted_values` / `relationships`, the port is mechanical. *(Say this instead of "no
+  tests" — the tests exist now.)*
 - **Static, single source.** No CDC / incremental watermark yet — I load the full set. The
   `MERGE` makes that safe to rerun, but a real incremental strategy would key off an
   updated-at column.

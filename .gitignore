@@ -11,3 +11,13 @@
 snowflake_config*
 *.pem
 *.p8
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Pipeline run manifests (generated at runtime)
+logs/

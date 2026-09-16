@@ -1,0 +1,4 @@
+# Development / CI dependencies.
+# The core verification (verify_metrics.py) and the test suite run on the Python
+# standard library alone — pytest is the only thing needed for `make test`.
+pytest>=7.4

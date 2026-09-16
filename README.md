@@ -2,12 +2,17 @@
 
 ![Snowflake](https://img.shields.io/badge/Snowflake-SQL-29B5E8?logo=snowflake&logoColor=white)
 ![Dimensional Modeling](https://img.shields.io/badge/Modeling-Star%20Schema-blue)
-![Python](https://img.shields.io/badge/Verified%20with-Python-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Orchestration%20%26%20tests-Python-3776AB?logo=python&logoColor=white)
+![Tests](https://img.shields.io/badge/pytest-41%20passing-brightgreen)
+![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 ![Status](https://img.shields.io/badge/Numbers-Reproducible-brightgreen)
 
-An end-to-end analytics engineering case study: three raw CSV files are turned into a
-clean, analytics-ready **star schema** on **Snowflake**, ready for a BI tool (Power BI /
-Tableau) to sit on top of. Built as a Senior Data Architect interview exercise.
+An end-to-end analytics-engineering case study: three raw CSV files become a clean,
+analytics-ready **star schema** on **Snowflake**, fronted by a governed reporting layer
+for BI (Power BI / Tableau). The pipeline is **orchestrated in Python** (structured
+logging, per-step timing, a JSON run manifest), **tested** (41 pytest data-contract and
+metric-regression checks), and wired to **CI** so every headline number stays
+reproducible on every push.
 
 📘 **Preparing for an interview with this?** Start with
 **[INTERVIEW_PREP.md](INTERVIEW_PREP.md)** — a self-contained study guide (pitch, walkthrough
@@ -26,19 +31,23 @@ script, design-decision defenses, and a question bank).
 ## Architecture
 
 ```
-CSV files  ─▶  RAW  ─▶  STAGING  ─▶  DIMENSIONS  ─▶  FACT TABLE  ─▶  BI / Analytics
-              (land)   (parse +      (clean          (one analytics-
-                        DQ flags)     lookups)         ready row/case)
+CSV ─▶ RAW ─▶ STAGING ─▶ DIMENSIONS ─▶ FACT ─▶ REPORTING ─▶ BI / Analytics
+       (land) (parse +    (clean        (1 row/  (governed
+               DQ flags)   lookups)      case)    KPI views)
+
+        orchestrated by run_pipeline.py  ·  guarded by pytest + CI
 ```
 
 | Layer | Single responsibility |
 |-------|----------------------|
 | **Raw** | Minimally transformed landing layer. Fields stay `VARCHAR`; ingestion metadata (`_loaded_at`, `_source_file`) is added, empty values are standardised to `NULL`, and spaces trimmed. Designed to tolerate source-format issues (`ON_ERROR = 'CONTINUE'`) without failing the whole batch. |
 | **Staging** | Parse types, normalise values, compute resolution time + the DQ flags. |
-| **Dimensions** | Clean lookup tables — `dim_customer`, `dim_agent`, `dim_date` (SCD2 columns present, see below). |
+| **Dimensions** | Clean lookup tables — `dim_customer`, `dim_agent`, `dim_date` (SCD2 columns present, see below), plus a small `dim_sla_policy` reference table. |
 | **Fact** | One analytics-ready row per case. No joins needed for the common queries. |
+| **Reporting** | Governed `rpt.*` views for BI — agent scorecard, region summary, SLA attainment, monthly trend — plus a single-row **data-quality monitor** for alerting. This layer actually exercises the role-playing `dim_date`. |
 
-Each layer has one job and can evolve independently in production.
+Each layer has one job and can evolve independently in production. The whole sequence is
+run in dependency order by [`run_pipeline.py`](run_pipeline.py) (see **Orchestration**).
 
 ### Data model — star schema
 
@@ -72,14 +81,23 @@ Each layer has one job and can evolve independently in production.
 │   ├── 02_Staging_Layer.sql      # Type parsing, normalisation, resolution time, DQ flags
 │   ├── 03_Dim_layer.sql          # dim_customer, dim_agent, dim_date (SCD2 columns)
 │   ├── 04_Analytics_layer.sql    # fact_cases MERGE + post-load validation checks
-│   └── 05_Analytics_query.sql    # Business questions answered against the fact table
-├── Data_Set/                     # Source data
-│   ├── cases.csv                 # 200 rows
-│   ├── customers.csv             # 150 rows
-│   └── agents.csv                # 40 rows
+│   ├── 05_Analytics_query.sql    # Business questions answered against the fact table
+│   └── 06_Reporting_Views.sql    # Governed rpt.* KPI views + data-quality monitor
+├── Data_Set/                     # Source data (cases 200 · customers 150 · agents 40)
+├── tests/                        # pytest suite (data contracts + metric regressions)
+│   ├── test_source_data.py       # unique / not-null / accepted-values / relationships
+│   ├── test_dq_rules.py          # DQ-flag counts locked to expected values
+│   └── test_metrics.py           # every headline number pinned so docs can't drift
+├── run_pipeline.py               # Orchestrator: runs the SQL in order, logs, times,
+│                                 #   captures row counts, writes a JSON run manifest
+├── verify_metrics.py             # Reproduces every headline number from the CSVs
+├── docs/DATA_DICTIONARY.md       # Column-level reference for fact / dims / rpt views
+├── .github/workflows/ci.yml      # CI: verify + dry-run + pytest on every push
+├── requirements.txt              # Runtime dep (snowflake-connector-python)
+├── requirements-dev.txt          # Dev/CI dep (pytest)
+├── Makefile                      # make verify / test / dry-run / pipeline
 ├── Data_Model.png                # Star-schema diagram
 ├── Case_Study_Presentation_PPT.pptx
-├── verify_metrics.py             # Reproduces every headline number from the CSVs
 ├── INTERVIEW_PREP.md             # Self-contained interview prep module (start here)
 ├── presentation_reference.md     # Original talking-points / speaker notes
 ├── LICENSE                       # MIT
@@ -246,7 +264,17 @@ Avg resolution by priority (clean, resolved)
 avoid running in the wrong database. Set your warehouse (`USE WAREHOUSE <your_warehouse>;`)
 before running.
 
-Run the SQL files **in order**:
+**Option A — one command (recommended).** [`run_pipeline.py`](run_pipeline.py) runs the
+layers in dependency order with logging, timing, and a run manifest:
+
+```bash
+pip install -r requirements.txt
+export SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=...
+export SNOWFLAKE_WAREHOUSE=... SNOWFLAKE_DATABASE=DEMO_DB
+python3 run_pipeline.py            # or: make pipeline
+```
+
+**Option B — run the SQL files by hand, in order:**
 
 | Step | File | Does |
 |------|------|------|
@@ -255,8 +283,12 @@ Run the SQL files **in order**:
 | 3 | `All_SQL/03_Dim_layer.sql` | Builds `dim_customer`, `dim_agent`, and a 2020–2030 `dim_date`. |
 | 4 | `All_SQL/04_Analytics_layer.sql` | MERGEs `fact_cases` and runs post-load validation. |
 | 5 | `All_SQL/05_Analytics_query.sql` | The business-question queries. |
+| 6 | `All_SQL/06_Reporting_Views.sql` | Builds the governed `rpt.*` views + the DQ monitor. |
 
-Then point Power BI / Tableau at `DEMO_DB.FACTS.FACT_CASES`.
+(`run_pipeline.py` runs steps 1–4 and 6 — the DDL/DML that builds the warehouse; step 5
+is the ad-hoc analysis and is left for the analyst.)
+
+Then point Power BI / Tableau at the `rpt.*` views (or `DEMO_DB.FACTS.FACT_CASES`).
 
 ### Expected validation results
 
@@ -281,6 +313,58 @@ FACT
   cases                                              200
   clean resolved cases (used for resolution KPIs)     38
 ```
+
+---
+
+## Orchestration & observability
+
+The five SQL files describe *what* the pipeline does; [`run_pipeline.py`](run_pipeline.py)
+is *how it runs* — the orchestration in code rather than in prose.
+
+- **Dependency order enforced** — layers run RAW → STAGING → DIMENSIONS → FACT → REPORTING;
+  the order is resolved explicitly, not left to filename sorting.
+- **Structured logging + per-step timing** — each layer logs statement count and duration.
+- **Row-count capture** — after a run it records counts for every key table.
+- **JSON run manifest** — written to `logs/run_<id>.json` (status, per-step timings, row
+  counts, any failed statement) so a run is auditable, not fire-and-forget.
+- **Dry-run mode** — `python3 run_pipeline.py --dry-run` validates the plan and parses
+  every statement **with no Snowflake account and no dependencies installed**. This is what
+  CI runs.
+- **Rerun-safe** — every step is idempotent (MERGE / expire-and-insert / `CREATE OR
+  REPLACE` / `COPY INTO`), so a failed run is simply re-executed from the top.
+- **A queryable health check** — `rpt.data_quality_monitor` returns one row with a
+  `pipeline_healthy` flag; a Snowflake Task can alert on it *before* dashboards refresh.
+
+```console
+$ python3 run_pipeline.py --dry-run
+run 20260916T172447Z | mode=dry-run | 5 steps | 64 statements
+[1/5] RAW         01_CSV_to_RAW.sql        (17 statements)  done in 0.001s
+[2/5] STAGING     02_Staging_Layer.sql     (9 statements)   done in 0.000s
+...
+manifest written: logs/run_20260916T172447Z.json
+pipeline SUCCESS
+```
+
+## Testing & CI
+
+The project's core promise is *reproducible numbers*. That promise is now **enforced**, not
+just asserted — the manual validation `SELECT`s in `04_…sql` are backed by an automated
+suite that fails the build on drift.
+
+| Test file | Guards | Analogous dbt test |
+|-----------|--------|--------------------|
+| `tests/test_source_data.py` | key uniqueness, not-null business keys, enum values (priority/status/category/region/team), referential integrity | `unique`, `not_null`, `accepted_values`, `relationships` |
+| `tests/test_dq_rules.py` | the five DQ-flag counts and the clean/resolved populations (9 · 123 · 132 · 68 · 38) | singular data tests |
+| `tests/test_metrics.py` | **every headline KPI** — overall 96.8 h, by-priority/team, region volume/closure, and the two counterintuitive findings | metric regression |
+
+```bash
+make test          # 41 passed in 0.10s   (pytest, stdlib only)
+make verify        # recompute every metric straight from the CSVs
+```
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `verify_metrics.py`, the
+orchestrator dry-run, and the full test suite on every push and PR — so if a source
+extract or a transformation ever moves a documented number, CI goes red.
 
 ---
 
@@ -315,22 +399,31 @@ rather than presenting them as firm conclusions.
 
 ## Future improvements
 
+- **Port the transformations to dbt.** The pipeline is now tested (pytest) and orchestrated
+  (`run_pipeline.py`); the natural next step is dbt models with in-warehouse tests, lineage,
+  and docs. The current pytest suite maps 1:1 onto dbt's `unique` / `not_null` /
+  `accepted_values` / `relationships`, so the migration is mechanical.
 - **Two timestamp DQ flags not yet implemented** (both are 0 in this dataset, so nothing is
   hidden today): `dq_flag_invalid_closed_at` for a non-null `closed_at` that fails to parse,
   and `dq_flag_invalid_resolution_order` for `closed_at <= created_at`. Today the pipeline
   relies on `resolution_hours` being NULL in those cases rather than raising an explicit flag.
-- **Automated tests.** The validation queries in `04_Analytics_layer.sql` are manual
-  `SELECT`s; in production they'd be dbt/Snowflake tests that fail the build.
-- **True incremental load** keyed on an updated-at watermark instead of a full reload.
+- **True incremental load** keyed on an updated-at watermark instead of a full reload, and a
+  Snowflake Task DAG that runs `run_pipeline.py`'s step order on a schedule and alerts off
+  `rpt.data_quality_monitor`.
 
 ---
 
 ## Tech stack
 
 **Snowflake SQL** (MERGE, `TRY_TO_*`, `GENERATOR`/`SEQ4` date spine, window functions,
-`QUALIFY`) · star-schema dimensional modelling · CSV → warehouse ingestion · BI-ready
-output for Power BI / Tableau.
+`QUALIFY`, role-playing dimension) · star-schema dimensional modelling · SCD2-ready
+dimensions · CSV → warehouse ingestion · governed reporting views + SLA analysis ·
+**Python** orchestration (logging, timing, run manifest) · **pytest** data-contract &
+metric-regression testing · **GitHub Actions** CI · BI-ready output for Power BI / Tableau.
+
+See [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) for the column-level reference.
 
 ---
 
-*Case study / interview exercise. Data is synthetic.*
+*Case study / interview exercise. Data is synthetic. Every headline number is reproducible
+via [`verify_metrics.py`](verify_metrics.py) and locked by the test suite.*

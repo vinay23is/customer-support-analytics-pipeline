@@ -1,0 +1,6 @@
+# Runtime dependencies for the pipeline orchestrator (run_pipeline.py).
+#
+# Only needed to EXECUTE the SQL against a live Snowflake account. The rest of the
+# repo — verify_metrics.py, the test suite, and `run_pipeline.py --dry-run` — runs
+# on the Python standard library with nothing installed.
+snowflake-connector-python>=3.6
